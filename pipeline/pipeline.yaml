@@ -1,0 +1,307 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Infraestructura del pipeline en la cuenta SecDevOps:
+  CodePipeline (source GitHub via CodeConnections) -> Validate (CodeBuild)
+  -> Approval (prod) -> Deploy StackSet (CodeBuild).
+  Desplegar UNA VEZ manualmente (bootstrap) en la cuenta SecDevOps.
+
+Parameters:
+  GitHubConnectionArn:
+    Type: String
+    Description: ARN de la conexion CodeConnections hacia GitHub (crearla y aprobarla antes en la consola)
+  GitHubRepo:
+    Type: String
+    Default: mi-org/bedrock-guardrails-stacksets
+    Description: owner/repo en GitHub
+  GitHubBranch:
+    Type: String
+    Default: main
+  PipelineName:
+    Type: String
+    Default: bedrock-guardrails-deploy
+
+Resources:
+
+  # ------------------------------------------------------------------
+  # Almacenamiento de artefactos (cifrado, sin acceso publico)
+  # ------------------------------------------------------------------
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${PipelineName}-artifacts-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 90
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ------------------------------------------------------------------
+  # Roles IAM (minimo privilegio)
+  # ------------------------------------------------------------------
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${PipelineName}-pipeline-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codepipeline.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Artifacts
+                Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject, s3:GetBucketVersioning]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+              - Sid: GitHubConnection
+                Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref GitHubConnectionArn
+              - Sid: CodeBuild
+                Effect: Allow
+                Action: [codebuild:StartBuild, codebuild:BatchGetBuilds]
+                Resource:
+                  - !GetAtt ValidateProject.Arn
+                  - !GetAtt DeployProject.Arn
+              - Sid: Notifications
+                Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ApprovalTopic
+
+  ValidateBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${PipelineName}-validate-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ValidatePermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${PipelineName}-*'
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
+                Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+
+  DeployBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${PipelineName}-deploy-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codebuild.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StackSetPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${PipelineName}-*'
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Sid: StackSetsDelegatedAdmin
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStackSet
+                  - cloudformation:UpdateStackSet
+                  - cloudformation:DescribeStackSet
+                  - cloudformation:DescribeStackSetOperation
+                  - cloudformation:ListStackSetOperations
+                  - cloudformation:ListStackInstances
+                  - cloudformation:CreateStackInstances
+                  - cloudformation:UpdateStackInstances
+                  - cloudformation:DeleteStackInstances
+                  - cloudformation:StopStackSetOperation
+                  - cloudformation:TagResource
+                Resource: '*'
+              - Sid: OrgReadForServiceManaged
+                Effect: Allow
+                Action:
+                  - organizations:ListAccounts
+                  - organizations:ListAccountsForParent
+                  - organizations:DescribeOrganization
+                  - organizations:ListDelegatedAdministrators
+                Resource: '*'
+
+  # ------------------------------------------------------------------
+  # Proyectos CodeBuild
+  # ------------------------------------------------------------------
+  ValidateProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${PipelineName}-validate'
+      ServiceRole: !GetAtt ValidateBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/validate.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      TimeoutInMinutes: 15
+
+  DeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${PipelineName}-deploy'
+      ServiceRole: !GetAtt DeployBuildRole.Arn
+      Artifacts: { Type: CODEPIPELINE }
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspecs/deploy.yaml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      TimeoutInMinutes: 60
+
+  ApprovalTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${PipelineName}-approvals'
+
+  # ------------------------------------------------------------------
+  # Pipeline
+  # ------------------------------------------------------------------
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref PipelineName
+      RoleArn: !GetAtt PipelineRole.Arn
+      PipelineType: V2
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHub
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref GitHubConnectionArn
+                FullRepositoryId: !Ref GitHubRepo
+                BranchName: !Ref GitHubBranch
+                DetectChanges: 'true'
+              OutputArtifacts: [{ Name: SourceOutput }]
+
+        - Name: Validate
+          Actions:
+            - Name: LintAndScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref ValidateProject
+              InputArtifacts: [{ Name: SourceOutput }]
+              OutputArtifacts: [{ Name: ValidatedOutput }]
+
+        - Name: DeployDev
+          Actions:
+            - Name: StackSetDev
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DeployProject
+                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"dev"}]'
+              InputArtifacts: [{ Name: ValidatedOutput }]
+
+        - Name: DeployQA
+          Actions:
+            - Name: StackSetQA
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DeployProject
+                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"qa"}]'
+              InputArtifacts: [{ Name: ValidatedOutput }]
+
+        - Name: ApproveProd
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !Ref ApprovalTopic
+                CustomData: 'Revisar cambios del guardrail antes de desplegar a PROD'
+
+        - Name: DeployProd
+          Actions:
+            - Name: StackSetProd
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref DeployProject
+                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"prod"}]'
+              InputArtifacts: [{ Name: ValidatedOutput }]
+
+Outputs:
+  PipelineUrl:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${PipelineName}/view'

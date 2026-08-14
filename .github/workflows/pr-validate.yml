@@ -1,0 +1,51 @@
+# Validacion rapida en Pull Requests (shift-left).
+# El despliegue real lo hace CodePipeline al hacer merge a main.
+name: pr-validate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write   # para OIDC hacia AWS (sin llaves estaticas)
+
+jobs:
+  lint-and-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar herramientas
+        run: pip install cfn-lint checkov
+
+      - name: cfn-lint
+        run: cfn-lint guardrails/template.yaml pipeline/pipeline.yaml
+
+      - name: checkov (seguridad IaC)
+        run: |
+          checkov -d guardrails --framework cloudformation --compact
+          checkov -d pipeline --framework cloudformation --compact
+
+      - name: Validar JSON de configuracion
+        run: python -c "import json; json.load(open('guardrails/config/deployment-targets.json'))"
+
+  # Opcional: validate-template contra AWS usando OIDC (rol de solo lectura)
+  aws-validate:
+    runs-on: ubuntu-latest
+    needs: lint-and-scan
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciales via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<SECDEVOPS_ACCOUNT_ID>:role/github-actions-validate-role
+          aws-region: us-east-1
+
+      - name: cloudformation validate-template
+        run: aws cloudformation validate-template --template-body file://guardrails/template.yaml

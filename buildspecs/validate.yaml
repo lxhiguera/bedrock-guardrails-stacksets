@@ -1,0 +1,23 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --quiet cfn-lint checkov
+  build:
+    commands:
+      - echo "== cfn-lint =="
+      - cfn-lint guardrails/template.yaml pipeline/pipeline.yaml
+      - echo "== checkov (IaC security scan) =="
+      - checkov -d guardrails --framework cloudformation --compact
+      - checkov -d pipeline --framework cloudformation --compact
+      - echo "== validate-template =="
+      - aws cloudformation validate-template --template-body file://guardrails/template.yaml
+      - echo "== validar JSON de configuracion =="
+      - python -c "import json; json.load(open('guardrails/config/deployment-targets.json'))"
+
+artifacts:
+  files:
+    - '**/*'

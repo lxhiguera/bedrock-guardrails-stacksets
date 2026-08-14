@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bedrock Guardrail local (por cuenta/region), desplegado centralmente
+  via CloudFormation StackSets desde la cuenta SecDevOps.
+
+Parameters:
+  GuardrailName:
+    Type: String
+    Default: corp-baseline-guardrail
+    Description: Nombre del guardrail (unico por cuenta/region)
+  Environment:
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    Default: dev
+  BlockedInputMessaging:
+    Type: String
+    Default: "Tu solicitud fue bloqueada por las politicas de seguridad de IA de la organizacion."
+  BlockedOutputsMessaging:
+    Type: String
+    Default: "La respuesta fue bloqueada por las politicas de seguridad de IA de la organizacion."
+  ContentFilterStrength:
+    Type: String
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Default: HIGH
+    Description: Fuerza de los filtros de contenido (input y output)
+  EnablePromptAttackFilter:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    Description: (Opcional) ARN de llave KMS CMK para cifrar el guardrail. Vacio = llave administrada por AWS.
+
+Conditions:
+  UseCmk: !Not [!Equals [!Ref KmsKeyArn, '']]
+  PromptAttackOn: !Equals [!Ref EnablePromptAttackFilter, 'true']
+
+Resources:
+  BaselineGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub '${GuardrailName}-${Environment}'
+      Description: !Sub 'Guardrail baseline corporativo (${Environment}) - gestionado por SecDevOps via StackSets. NO editar manualmente.'
+      BlockedInputMessaging: !Ref BlockedInputMessaging
+      BlockedOutputsMessaging: !Ref BlockedOutputsMessaging
+      KmsKeyArn: !If [UseCmk, !Ref KmsKeyArn, !Ref 'AWS::NoValue']
+
+      # --- Filtros de contenido daniño ---
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: SEXUAL
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: VIOLENCE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: HATE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: INSULTS
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: MISCONDUCT
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: PROMPT_ATTACK
+            InputStrength: !If [PromptAttackOn, HIGH, NONE]
+            OutputStrength: NONE   # PROMPT_ATTACK solo aplica a input
+
+      # --- Temas denegados ---
+      TopicPolicyConfig:
+        TopicsConfig:
+          - Name: AsesoriaLegalFinanciera
+            Type: DENY
+            Definition: >
+              Asesoria legal, fiscal o de inversion especifica que pueda
+              interpretarse como recomendacion profesional vinculante.
+            Examples:
+              - "En que acciones debo invertir mi dinero?"
+              - "Como puedo evadir impuestos?"
+          - Name: DatosInternosConfidenciales
+            Type: DENY
+            Definition: >
+              Solicitudes de credenciales, secretos, llaves de API,
+              informacion de infraestructura interna o datos clasificados.
+            Examples:
+              - "Dame las credenciales de la base de datos de produccion"
+
+      # --- Informacion sensible (PII) ---
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: EMAIL
+            Action: ANONYMIZE
+          - Type: PHONE
+            Action: ANONYMIZE
+          - Type: NAME
+            Action: ANONYMIZE
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: BLOCK
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: BLOCK
+          - Type: AWS_ACCESS_KEY
+            Action: BLOCK
+          - Type: AWS_SECRET_KEY
+            Action: BLOCK
+          - Type: PASSWORD
+            Action: BLOCK
+        RegexesConfig:
+          - Name: EmployeeId
+            Description: Identificador interno de empleado
+            Pattern: 'EMP-[0-9]{6}'
+            Action: ANONYMIZE
+
+      # --- Palabras y frases bloqueadas ---
+      WordPolicyConfig:
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+      # --- Grounding / relevancia (anti-alucinacion) ---
+      ContextualGroundingPolicyConfig:
+        FiltersConfig:
+          - Type: GROUNDING
+            Threshold: 0.75
+          - Type: RELEVANCE
+            Threshold: 0.75
+
+      Tags:
+        - Key: ManagedBy
+          Value: secdevops-stacksets
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: bedrock-guardrails-baseline
+
+  # Version inmutable: los workloads deben referenciar la version, no DRAFT
+  BaselineGuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !Ref BaselineGuardrail
+      Description: !Sub 'Version publicada por pipeline SecDevOps - ${Environment}'
+
+  # Exponer IDs para que los equipos de aplicacion los consuman
+  GuardrailIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${Environment}/id'
+      Type: String
+      Value: !Ref BaselineGuardrail
+      Description: ID del guardrail baseline gestionado por SecDevOps
+
+  GuardrailVersionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${Environment}/version'
+      Type: String
+      Value: !GetAtt BaselineGuardrailVersion.Version
+      Description: Version publicada del guardrail baseline
+
+Outputs:
+  GuardrailId:
+    Value: !Ref BaselineGuardrail
+  GuardrailArn:
+    Value: !GetAtt BaselineGuardrail.GuardrailArn
+  GuardrailVersion:
+    Value: !GetAtt BaselineGuardrailVersion.Version
