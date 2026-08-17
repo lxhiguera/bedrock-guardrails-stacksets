@@ -9,14 +9,14 @@ phases:
   build:
     commands:
       - echo "== cfn-lint =="
-      - cfn-lint guardrails/template.yaml pipeline/pipeline.yaml
+      - cfn-lint guardrails/*/template.yaml pipeline/pipeline.yaml
       - echo "== checkov (IaC security scan) =="
       - checkov -d guardrails --framework cloudformation --compact
       - checkov -d pipeline --framework cloudformation --compact
-      - echo "== validate-template =="
-      - aws cloudformation validate-template --template-body file://guardrails/template.yaml
-      - echo "== validar JSON de configuracion =="
-      - python -c "import json; json.load(open('guardrails/config/deployment-targets.json'))"
+      - echo "== validate-template (por guardrail) =="
+      - for f in guardrails/*/template.yaml; do aws cloudformation validate-template --template-body "file://$f"; done
+      - echo "== validar JSON de targets (por guardrail) =="
+      - for f in guardrails/*/targets.json; do python -c "import json,sys; json.load(open(sys.argv[1]))" "$f"; done
 
 artifacts:
   files:

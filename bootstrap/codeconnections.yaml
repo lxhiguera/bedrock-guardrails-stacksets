@@ -1,0 +1,27 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Crea la conexion CodeConnections hacia GitHub en la cuenta SecDevOps
+  (474632925684). Desplegar UNA VEZ, manualmente, ANTES del pipeline
+  principal (pipeline/pipeline.yaml), en la misma cuenta y region donde
+  correra CodePipeline.
+
+  Tras el deploy, la conexion queda en estado PENDING: hay que completar
+  la autorizacion en la consola de AWS (CodePipeline > Settings >
+  Connections > Update pending connection) para que pase a AVAILABLE.
+
+Parameters:
+  ConnectionName:
+    Type: String
+    Default: bedrock-guardrails-github
+
+Resources:
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Ref ConnectionName
+      ProviderType: GitHub
+
+Outputs:
+  ConnectionArn:
+    Description: Pasar este ARN como parametro GitHubConnectionArn de pipeline/pipeline.yaml
+    Value: !GetAtt GitHubConnection.ConnectionArn

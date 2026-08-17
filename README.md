@@ -43,45 +43,110 @@ administrador delegado**.
 2.  **Merge a `main`** → CodeConnections dispara **CodePipeline** en SecDevOps.
 3.  **Validate** repite lint + scan dentro de AWS (no confiar solo en checks del
     lado de GitHub).
-4.  **Deploy** por entorno: CodeBuild ejecuta `scripts/deploy_stackset.py`, que
-    crea/actualiza el StackSet (`SERVICE_MANAGED`, `CallAs=DELEGATED_ADMIN`) y
-    sus stack instances por OU/región.
+4.  **Deploy** por entorno: CodeBuild ejecuta `scripts/deploy_stackset.py --env
+    <env>`, que **descubre automáticamente** cada carpeta en `guardrails/` y,
+    para cada una que defina ese entorno en su `targets.json`, crea/actualiza
+    su StackSet (`SERVICE_MANAGED`, `CallAs=DELEGATED_ADMIN`) y sus stack
+    instances por OU/región (opcionalmente filtrando cuentas específicas
+    dentro de la OU).
 5.  **Aprobación manual** antes de prod (SNS notifica a los aprobadores).
 6.  En cada cuenta destino se crea el guardrail **local**, una **versión
-    inmutable publicada** y **SSM Parameters** (`
-    /security/bedrock/guardrail/\<env>/id|version`) para que los equipos de
-    aplicación referencien el guardrail sin hardcodear IDs.
+    inmutable publicada** y **SSM Parameters** con namespace por guardrail
+    (`/security/bedrock/guardrail/<nombre>/<env>/id|version`) para que los
+    equipos de aplicación referencien el guardrail sin hardcodear IDs.
 
 ## Estructura del repo
 
 ```
 ├── guardrails/
-│   ├── template.yaml                  # AWS::Bedrock::Guardrail + Version + SSM
-│   └── config/deployment-targets.json # OUs, regiones, parámetros por entorno
+│   └── <nombre>/                      # Un directorio por guardrail (ej. general/)
+│       ├── template.yaml              # AWS::Bedrock::Guardrail + Version + SSM
+│       └── targets.json               # OUs/cuentas, regiones, parámetros por entorno
 ├── pipeline/pipeline.yaml             # Bootstrap del pipeline en SecDevOps
+├── bootstrap/
+│   ├── delegated-admin.md             # Comandos CLI (cuenta management, una vez)
+│   └── codeconnections.yaml           # Conexión GitHub en cuenta SecDevOps
 ├── buildspecs/
 │   ├── validate.yaml
 │   └── deploy.yaml
-├── scripts/deploy_stackset.py         # Despliegue idempotente del StackSet
+├── scripts/deploy_stackset.py         # Despliegue idempotente multi-guardrail
 └── .github/workflows/pr-validate.yml  # Validación en PRs
+```
+
+### Modelo multi-guardrail
+
+`scripts/deploy_stackset.py` no tiene un registro manual de guardrails: recorre
+`guardrails/*/` y toma cualquier carpeta que tenga `template.yaml` +
+`targets.json`. Reglas:
+
+- **Un StackSet por guardrail y entorno**: `<stackset_prefix>-<env>`, donde
+  `stackset_prefix` se define dentro del `targets.json` de cada guardrail.
+- Si el `targets.json` de un guardrail **no define** un entorno (`dev`/`qa`/`prod`),
+  ese guardrail se omite en esa etapa — no es un error.
+- `targets.json` siempre lleva `organizational_unit_ids`; opcionalmente
+  `account_ids` + `account_filter_type` (`INTERSECTION` o `DIFFERENCE`) para
+  acotar a cuentas específicas dentro de una OU.
+- **Guardrail nuevo**: copiar una carpeta existente (ej. `guardrails/general/`),
+  cambiar el `Name`/`GuardrailName` en el template y ajustar `targets.json`.
+  No hace falta registrar nada más — el script lo detecta solo.
+
+### Validación local antes de commitear
+
+```bash
+cfn-lint guardrails/*/template.yaml pipeline/pipeline.yaml
+checkov -d guardrails --framework cloudformation --compact
 ```
 ## Requisitos previos (bootstrap, una sola vez)
 
-1.  **Delegated admin**: desde la cuenta de management de la organización,
-    registrar la cuenta SecDevOps como administrador delegado de CloudFormation
-    StackSets y habilitar *trusted access* con Organizations.
-2.  **Conexión GitHub**: crear una conexión **CodeConnections** hacia GitHub en
-    la cuenta SecDevOps y aprobarla (queda `PENDING` hasta autorizarla en la
-    consola).
-3.  **Desplegar el pipeline**: `aws cloudformation deploy --template-file
-    pipeline/pipeline.yaml --stack-name bedrock-guardrails-pipeline
-    \--capabilities CAPABILITY_NAMED_IAM --parameter-overrides
-    GitHubConnectionArn=\<arn> GitHubRepo=\<owner/repo>` en la cuenta SecDevOps.
+Esta Landing Zone concreta usa: cuenta SecDevOps `474632925684`, cuenta
+management `758626604929`, OU DEV `ou-p9fr-dqd5qn16` (no hay OUs de QA/Prod
+todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
+
+1.  **Delegated admin**: desde la cuenta management, registrar SecDevOps como
+    administrador delegado de CloudFormation StackSets y habilitar *trusted
+    access* con Organizations. No se puede hacer con CloudFormation — seguir
+    los comandos AWS CLI en [`bootstrap/delegated-admin.md`](bootstrap/delegated-admin.md).
+2.  **Conexión GitHub**: crear una conexión **CodeConnections** hacia GitHub
+    en la cuenta SecDevOps (no en la cuenta management) con
+    [`bootstrap/codeconnections.yaml`](bootstrap/codeconnections.yaml):
+    ```bash
+    aws cloudformation deploy \
+      --template-file bootstrap/codeconnections.yaml \
+      --stack-name bedrock-guardrails-github-connection \
+      --region us-east-1
+    ```
+    Luego aprobarla manualmente en la consola (CodePipeline > Settings >
+    Connections) — queda `PENDING` hasta autorizar el acceso a GitHub. Copiar
+    el `ConnectionArn` de los outputs del stack para el paso siguiente.
+3.  **Desplegar el pipeline**:
+    ```bash
+    aws cloudformation deploy \
+      --template-file pipeline/pipeline.yaml \
+      --stack-name bedrock-guardrails-pipeline \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --region us-east-1 \
+      --parameter-overrides \
+        GitHubConnectionArn=<arn del paso 2> \
+        GitHubRepo=<owner/repo>
+    ```
+    en la cuenta SecDevOps (`474632925684`).
 4.  **OIDC para GitHub Actions** (opcional): crear el rol `
     github-actions-validate-role` con trust hacia el proveedor OIDC de GitHub,
-    permisos de solo lectura (`cloudformation:ValidateTemplate`).
-5.  Editar `guardrails/config/deployment-targets.json` con tus OUs y regiones
-    reales.
+    permisos de solo lectura (`cloudformation:ValidateTemplate`), en la cuenta
+    SecDevOps.
+5.  `guardrails/general/targets.json` ya está editado con los valores reales
+    de esta Landing Zone; actualizar los campos `_todo` de `qa`/`prod` cuando
+    existan las OUs correspondientes.
+
+## Flujo de trabajo en git
+
+- **No se permite push directo a `main`.** Todo cambio va por Pull Request y
+  debe pasar el required check **"CencoCorp Scan Security"** (workflow de la
+  organización, fuera de este repo).
+- Antes de commitear, crear siempre una rama: `git checkout -b feat/...` (o
+  `fix/...`, `docs/...`, `ci/...`).
+- Mensajes de commit en español, estilo *Conventional Commits*
+  (`feat:`, `fix:`, `docs:`, `ci:`).
 
 ## Mejores prácticas incorporadas
 
@@ -92,7 +157,7 @@ administrador delegado**.
 - Targets por **OU**, nunca listas de cuentas hardcodeadas.
 - `FailureTolerancePercentage` y `MaxConcurrentPercentage` configurables para
   despliegues progresivos y contención de fallos.
-- Un StackSet por entorno (`\-dev`, `\-qa`, `\-prod`) con parámetros
+- Un StackSet por entorno (`\\-dev`, `\\-qa`, `\\-prod`) con parámetros
   diferenciados (dev con filtros MEDIUM, prod HIGH).
 - Aprobación manual antes de producción.
 
@@ -100,8 +165,9 @@ administrador delegado**.
 
 - `AWS::Bedrock::GuardrailVersion`: los workloads consumen una versión
   inmutable, no `DRAFT`. Un cambio no aprobado en el draft no afecta producción.
-- Publicación de ID/versión en **SSM Parameter Store** con path estándar: los
-  equipos hacen `{{resolve:ssm:/security/bedrock/guardrail/prod/id}}` y quedan
+- Publicación de ID/versión en **SSM Parameter Store** con path estándar por
+  guardrail: los equipos hacen
+  `{{resolve:ssm:/security/bedrock/guardrail/general/prod/id}}` y quedan
   desacoplados.
 - Cobertura completa: filtros de contenido (incl. `PROMPT_ATTACK`), temas
   denegados, PII (bloqueo de credenciales AWS, tarjetas; anonimización de

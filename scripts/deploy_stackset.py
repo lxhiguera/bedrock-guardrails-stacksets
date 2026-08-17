@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
-Despliegue idempotente de un StackSet SERVICE_MANAGED (delegated admin)
-para Bedrock Guardrails locales.
+Despliegue idempotente multi-guardrail de StackSets SERVICE_MANAGED
+(delegated admin) para Bedrock Guardrails locales.
 
+Descubre automaticamente cada guardrails/<nombre>/ que contenga
+template.yaml + targets.json. Por cada guardrail que defina el entorno
+solicitado en targets.json:
 - Crea el StackSet si no existe; lo actualiza si existe.
-- Crea/actualiza stack instances apuntando a las OUs configuradas.
-- Espera a que las operaciones terminen y falla el build si la operacion falla.
+- Crea/actualiza stack instances apuntando a las OUs (y opcionalmente
+  cuentas especificas dentro de ellas) configuradas.
+- Espera a que las operaciones terminen y falla el build si alguna falla.
+
+Un guardrail que no define el entorno solicitado en su targets.json se
+omite silenciosamente para esa etapa (no es un error).
 """
 import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 import boto3
 from botocore.exceptions import ClientError
@@ -35,41 +43,57 @@ def wait_for_operation(cfn, stackset_name, operation_id, call_as):
         time.sleep(POLL_SECONDS)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env", required=True, choices=["dev", "qa", "prod"])
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--template", required=True)
-    args = parser.parse_args()
+def build_deployment_targets(env_cfg):
+    targets = {"OrganizationalUnitIds": env_cfg["organizational_unit_ids"]}
+    if env_cfg.get("account_ids"):
+        targets["Accounts"] = env_cfg["account_ids"]
+        targets["AccountFilterType"] = env_cfg.get("account_filter_type", "INTERSECTION")
+    return targets
 
-    with open(args.config) as f:
+
+def discover_guardrails(guardrails_dir):
+    guardrails = []
+    for path in sorted(Path(guardrails_dir).iterdir()):
+        if not path.is_dir():
+            continue
+        template_path = path / "template.yaml"
+        targets_path = path / "targets.json"
+        if template_path.exists() and targets_path.exists():
+            guardrails.append((path.name, template_path, targets_path))
+    return guardrails
+
+
+def deploy_guardrail(cfn, name, template_path, targets_path, env):
+    with open(targets_path) as f:
         cfg = json.load(f)
-    with open(args.template) as f:
-        template_body = f.read()
 
-    env_cfg = cfg["environments"][args.env]
-    stackset_name = f'{cfg["stackset_name"]}-{args.env}'
+    if env not in cfg.get("environments", {}):
+        print(f"[{name}] entorno '{env}' no definido en targets.json, se omite.")
+        return
+
+    env_cfg = cfg["environments"][env]
+    stackset_name = f'{cfg["stackset_prefix"]}-{env}'
     call_as = cfg.get("call_as", "DELEGATED_ADMIN")
     op_prefs = cfg.get("operation_preferences", {})
+    deployment_targets = build_deployment_targets(env_cfg)
+
+    with open(template_path) as f:
+        template_body = f.read()
 
     parameters = [
         {"ParameterKey": k, "ParameterValue": v}
         for k, v in env_cfg["parameters"].items()
     ]
 
-    cfn = boto3.client("cloudformation")
+    print(f"[{name}] Desplegando StackSet {stackset_name} para entorno {env}...")
 
-    common = dict(
-        StackSetName=stackset_name,
-        CallAs=call_as,
-    )
+    common = dict(StackSetName=stackset_name, CallAs=call_as)
 
-    # 1. Crear o actualizar el StackSet
     try:
         cfn.describe_stack_set(**common)
         exists = True
     except ClientError as e:
-        if e.response["Error"]["Code"] in ("StackSetNotFoundException",):
+        if e.response["Error"]["Code"] == "StackSetNotFoundException":
             exists = False
         else:
             raise
@@ -85,54 +109,65 @@ def main():
             {"Enabled": True, "RetainStacksOnAccountRemoval": False},
         ),
         Tags=[
-            {"Key": "ManagedBy", "Value": "secdevops-pipeline"},
-            {"Key": "Environment", "Value": args.env},
+            {"Key": "ManagedBy", "Value": "secdevops-stacksets"},
+            {"Key": "Environment", "Value": env},
         ],
     )
 
     if not exists:
-        print(f"Creando StackSet {stackset_name}...")
+        print(f"[{name}] Creando StackSet {stackset_name}...")
         cfn.create_stack_set(**stackset_args)
     else:
-        print(f"Actualizando StackSet {stackset_name}...")
+        print(f"[{name}] Actualizando StackSet {stackset_name}...")
         try:
             op = cfn.update_stack_set(
                 **stackset_args,
                 OperationPreferences=op_prefs,
-                DeploymentTargets={
-                    "OrganizationalUnitIds": env_cfg["organizational_unit_ids"]
-                },
+                DeploymentTargets=deployment_targets,
                 Regions=env_cfg["regions"],
             )
             wait_for_operation(cfn, stackset_name, op["OperationId"], call_as)
         except ClientError as e:
             if "No updates" in str(e):
-                print("Sin cambios en el template/parametros.")
+                print(f"[{name}] Sin cambios en el template/parametros.")
             else:
                 raise
 
-    # 2. Asegurar stack instances en las OUs objetivo
     instances = cfn.list_stack_instances(**common).get("Summaries", [])
     if not instances:
-        print("Creando stack instances...")
+        print(f"[{name}] Creando stack instances...")
         op = cfn.create_stack_instances(
             **common,
-            DeploymentTargets={
-                "OrganizationalUnitIds": env_cfg["organizational_unit_ids"]
-            },
+            DeploymentTargets=deployment_targets,
             Regions=env_cfg["regions"],
             OperationPreferences=op_prefs,
         )
         wait_for_operation(cfn, stackset_name, op["OperationId"], call_as)
     else:
-        print(f"{len(instances)} stack instances existentes.")
+        print(f"[{name}] {len(instances)} stack instances existentes.")
 
-    # 3. Reportar estado final
     for inst in cfn.list_stack_instances(**common).get("Summaries", []):
         print(
-            f'  {inst["Account"]} / {inst["Region"]}: '
+            f'  [{name}] {inst["Account"]} / {inst["Region"]}: '
             f'{inst.get("StackInstanceStatus", {}).get("DetailedStatus", inst.get("Status"))}'
         )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--env", required=True, choices=["dev", "qa", "prod"])
+    parser.add_argument("--guardrails-dir", default="guardrails")
+    args = parser.parse_args()
+
+    guardrails = discover_guardrails(args.guardrails_dir)
+    if not guardrails:
+        sys.exit(f"ERROR: no se encontraron guardrails en {args.guardrails_dir}/")
+
+    print(f"Guardrails detectados: {', '.join(name for name, _, _ in guardrails)}")
+
+    cfn = boto3.client("cloudformation")
+    for name, template_path, targets_path in guardrails:
+        deploy_guardrail(cfn, name, template_path, targets_path, args.env)
 
     print("Despliegue completado.")
 
