@@ -25,6 +25,54 @@ Resources:
   # ------------------------------------------------------------------
   # Almacenamiento de artefactos (cifrado, sin acceso publico)
   # ------------------------------------------------------------------
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: >-
+              Bucket destino de access logs; habilitarle logging a si mismo
+              crearia un loop recursivo. Patron estandar de AWS.
+    Properties:
+      BucketName: !Sub '${PipelineName}-access-logs-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
   ArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -40,6 +88,9 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: artifact-bucket-access-logs/
       LifecycleConfiguration:
         Rules:
           - Id: ExpireOldArtifacts
@@ -129,6 +180,16 @@ Resources:
 
   DeployBuildRole:
     Type: AWS::IAM::Role
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: >-
+              Las acciones de StackSets (CreateStackSet, UpdateStackSet, etc.)
+              no soportan permisos a nivel de recurso para create/update en
+              todos los casos; Resource:* es requerido por la API de AWS.
+              Mitigado por CallAs=DELEGATED_ADMIN + trust boundary de
+              Organizations (solo SecDevOps es delegated admin).
     Properties:
       RoleName: !Sub '${PipelineName}-deploy-role'
       AssumeRolePolicyDocument:
@@ -209,6 +270,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub '${PipelineName}-approvals'
+      KmsMasterKeyId: alias/aws/sns
 
   # ------------------------------------------------------------------
   # Pipeline
