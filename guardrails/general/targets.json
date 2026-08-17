@@ -1,7 +1,8 @@
 {
-  "stackset_prefix": "bedrock-guardrail-general",
+  "stackset_name": "bedrock-guardrail-general",
   "call_as": "DELEGATED_ADMIN",
   "permission_model": "SERVICE_MANAGED",
+  "require_approval": false,
   "auto_deployment": {
     "Enabled": true,
     "RetainStacksOnAccountRemoval": false
@@ -10,47 +11,15 @@
     "FailureTolerancePercentage": 0,
     "MaxConcurrentPercentage": 100
   },
-  "environments": {
-    "dev": {
-      "organizational_unit_ids": ["ou-p9fr-dqd5qn16"],
-      "regions": ["us-east-1"],
-      "parameters": {
-        "GuardrailName": "general",
-        "Environment": "dev",
-        "ContentFilterStrength": "MEDIUM",
-        "PromptAttackFilterStrength": "HIGH",
-        "BlockedInputMessaging": "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail.",
-        "BlockedOutputsMessaging": "La respuesta fue bloqueada por las politicas de seguridad del guardrail.",
-        "KmsKeyArn": ""
-      }
-    },
-    "qa": {
-      "_todo": "Apunta temporalmente a la OU DEV (ou-p9fr-dqd5qn16) porque aun no existe una OU de QA en la Landing Zone. Reemplazar organizational_unit_ids cuando se cree.",
-      "organizational_unit_ids": ["ou-p9fr-dqd5qn16"],
-      "regions": ["us-east-1"],
-      "parameters": {
-        "GuardrailName": "general",
-        "Environment": "qa",
-        "ContentFilterStrength": "MEDIUM",
-        "PromptAttackFilterStrength": "HIGH",
-        "BlockedInputMessaging": "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail.",
-        "BlockedOutputsMessaging": "La respuesta fue bloqueada por las politicas de seguridad del guardrail.",
-        "KmsKeyArn": ""
-      }
-    },
-    "prod": {
-      "_todo": "Apunta temporalmente a la OU DEV (ou-p9fr-dqd5qn16) porque aun no existe una OU de PROD en la Landing Zone. Reemplazar organizational_unit_ids cuando se cree -- revisar antes de aprobar el deploy manual a prod.",
-      "organizational_unit_ids": ["ou-p9fr-dqd5qn16"],
-      "regions": ["us-east-1"],
-      "parameters": {
-        "GuardrailName": "general",
-        "Environment": "prod",
-        "ContentFilterStrength": "HIGH",
-        "PromptAttackFilterStrength": "HIGH",
-        "BlockedInputMessaging": "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail.",
-        "BlockedOutputsMessaging": "La respuesta fue bloqueada por las politicas de seguridad del guardrail.",
-        "KmsKeyArn": ""
-      }
-    }
+  "organizational_unit_ids": ["ou-p9fr-dqd5qn16"],
+  "regions": ["us-east-1"],
+  "parameters": {
+    "GuardrailName": "general",
+    "EnvironmentTag": "shared",
+    "ContentFilterStrength": "MEDIUM",
+    "PromptAttackFilterStrength": "HIGH",
+    "BlockedInputMessaging": "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail.",
+    "BlockedOutputsMessaging": "La respuesta fue bloqueada por las politicas de seguridad del guardrail.",
+    "KmsKeyArn": ""
   }
 }

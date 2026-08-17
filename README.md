@@ -18,24 +18,31 @@ administrador delegado**.
 │             │   PRs: GitHub Actions  │  CodePipeline (V2)                           │
 │  Actions:   │   (cfn-lint, checkov)  │   1. Source  ── CodeConnections (GitHub)     │
 │  pr-validate│                        │   2. Validate ─ CodeBuild (lint + checkov)   │
-└─────────────┘                        │   3. DeployDev ─ CodeBuild → StackSet dev    │
-                                       │   4. DeployQA  ─ CodeBuild → StackSet qa     │
-                                       │   5. Approval  ─ Manual (SNS)                │
-                                       │   6. DeployProd─ CodeBuild → StackSet prod   │
+└─────────────┘                        │   3. Deploy   ─ CodeBuild → guardrails       │
+                                       │      (require_approval=false)                │
+                                       │   4. ApproveDeploy ─ Manual (SNS)             │
+                                       │   5. DeployApproved ─ CodeBuild → guardrails  │
+                                       │      (require_approval=true)                 │
                                        └──────────────────┬───────────────────────────┘
                                                           │ StackSets SERVICE_MANAGED
-                                                          │ (targets = OUs, auto-deployment)
+                                                          │ (1 StackSet por guardrail)
                           ┌───────────────────────────────┼───────────────────────────────┐
                           ▼                               ▼                               ▼
                  ┌─────────────────┐            ┌─────────────────┐            ┌─────────────────┐
-                 │  OU Dev         │            │  OU QA          │            │  OU Prod        │
-                 │  Cuenta A, B... │            │  Cuenta C...    │            │  Cuenta D, E... │
+                 │  Guardrail A    │            │  Guardrail B    │            │  Guardrail C    │
+                 │  → OU/cuenta X  │            │  → OU/cuenta Y  │            │  → OU/cuenta Z  │
                  │  Stack instance:│            │  Stack instance:│            │  Stack instance:│
                  │  · Guardrail    │            │  · Guardrail    │            │  · Guardrail    │
                  │  · GuardrailVer │            │  · GuardrailVer │            │  · GuardrailVer │
                  │  · SSM params   │            │  · SSM params   │            │  · SSM params   │
                  └─────────────────┘            └─────────────────┘            └─────────────────┘
 ```
+
+Cada guardrail declara **su propio destino** (OU o cuenta específica, la que
+sea) en su `targets.json` — no existe el concepto de "entornos" dev/qa/prod
+como destino. Lo único que varía por guardrail es si necesita aprobación
+manual antes de aplicarse (`require_approval`).
+
 ### Flujo
 
 1.  **PR en GitHub** → GitHub Actions ejecuta `cfn-lint`, `checkov` y validación
@@ -43,16 +50,18 @@ administrador delegado**.
 2.  **Merge a `main`** → CodeConnections dispara **CodePipeline** en SecDevOps.
 3.  **Validate** repite lint + scan dentro de AWS (no confiar solo en checks del
     lado de GitHub).
-4.  **Deploy** por entorno: CodeBuild ejecuta `scripts/deploy_stackset.py --env
-    <env>`, que **descubre automáticamente** cada carpeta en `guardrails/` y,
-    para cada una que defina ese entorno en su `targets.json`, crea/actualiza
-    su StackSet (`SERVICE_MANAGED`, `CallAs=DELEGATED_ADMIN`) y sus stack
-    instances por OU/región (opcionalmente filtrando cuentas específicas
-    dentro de la OU).
-5.  **Aprobación manual** antes de prod (SNS notifica a los aprobadores).
-6.  En cada cuenta destino se crea el guardrail **local**, una **versión
+4.  **Deploy**: CodeBuild ejecuta `scripts/deploy_stackset.py --stage auto`, que
+    **descubre automáticamente** cada carpeta en `guardrails/` y despliega de
+    inmediato cualquier guardrail con `require_approval: false` (o ausente) —
+    crea/actualiza su StackSet (`SERVICE_MANAGED`, `CallAs=DELEGATED_ADMIN`) y
+    sus stack instances por OU/cuenta/región definidos en su `targets.json`.
+5.  **ApproveDeploy** — gate de aprobación manual (SNS) antes de aplicar los
+    guardrails marcados `require_approval: true`.
+6.  **DeployApproved**: mismo script con `--stage approved`, despliega solo
+    esos guardrails.
+7.  En cada cuenta destino se crea el guardrail **local**, una **versión
     inmutable publicada** y **SSM Parameters** con namespace por guardrail
-    (`/security/bedrock/guardrail/<nombre>/<env>/id|version`) para que los
+    (`/security/bedrock/guardrail/<nombre>/id|version`) para que los
     equipos de aplicación referencien el guardrail sin hardcodear IDs.
 
 ## Estructura del repo
@@ -61,7 +70,7 @@ administrador delegado**.
 ├── guardrails/
 │   └── <nombre>/                      # Un directorio por guardrail (ej. general/)
 │       ├── template.yaml              # AWS::Bedrock::Guardrail + Version + SSM
-│       └── targets.json               # OUs/cuentas, regiones, parámetros por entorno
+│       └── targets.json               # Un destino (OU/cuentas), regiones, parámetros, require_approval
 ├── pipeline/pipeline.yaml             # Bootstrap del pipeline en SecDevOps
 ├── bootstrap/
 │   ├── delegated-admin.md             # Comandos CLI (cuenta management, una vez)
@@ -79,16 +88,38 @@ administrador delegado**.
 `guardrails/*/` y toma cualquier carpeta que tenga `template.yaml` +
 `targets.json`. Reglas:
 
-- **Un StackSet por guardrail y entorno**: `<stackset_prefix>-<env>`, donde
-  `stackset_prefix` se define dentro del `targets.json` de cada guardrail.
-- Si el `targets.json` de un guardrail **no define** un entorno (`dev`/`qa`/`prod`),
-  ese guardrail se omite en esa etapa — no es un error.
+- **Un StackSet por guardrail** (`stackset_name` en su `targets.json`) — un
+  único destino, no hay sufijos de entorno.
 - `targets.json` siempre lleva `organizational_unit_ids`; opcionalmente
   `account_ids` + `account_filter_type` (`INTERSECTION` o `DIFFERENCE`) para
-  acotar a cuentas específicas dentro de una OU.
+  acotar a cuentas específicas dentro de una OU. Puede ser cualquier OU o
+  cuenta — no está atado a un concepto de "entorno".
+- `require_approval` (`true`/`false`, default `false`) decide en qué etapa del
+  pipeline cae ese guardrail: `Deploy` (inmediato) o `DeployApproved` (después
+  del gate manual `ApproveDeploy`).
 - **Guardrail nuevo**: copiar una carpeta existente (ej. `guardrails/general/`),
-  cambiar el `Name`/`GuardrailName` en el template y ajustar `targets.json`.
-  No hace falta registrar nada más — el script lo detecta solo.
+  cambiar el `Name`/`GuardrailName` en el template y ajustar `targets.json`
+  (destino, `require_approval`, parámetros). No hace falta registrar nada más
+  — el script lo detecta solo.
+- Si un guardrail necesita aplicarse a **varios destinos distintos** con
+  configuraciones diferentes, se crean carpetas separadas (ej.
+  `guardrails/general-sandbox/`, `guardrails/general-clientes/`), cada una con
+  su propio `targets.json` — no un solo guardrail con múltiples destinos.
+
+Ejemplo de `targets.json`:
+```json
+{
+  "stackset_name": "bedrock-guardrail-general",
+  "call_as": "DELEGATED_ADMIN",
+  "permission_model": "SERVICE_MANAGED",
+  "require_approval": false,
+  "auto_deployment": { "Enabled": true, "RetainStacksOnAccountRemoval": false },
+  "operation_preferences": { "FailureTolerancePercentage": 0, "MaxConcurrentPercentage": 100 },
+  "organizational_unit_ids": ["ou-p9fr-dqd5qn16"],
+  "regions": ["us-east-1"],
+  "parameters": { "GuardrailName": "general", "EnvironmentTag": "shared", "...": "..." }
+}
+```
 
 ### Validación local antes de commitear
 
@@ -99,8 +130,9 @@ checkov -d guardrails --framework cloudformation --compact
 ## Requisitos previos (bootstrap, una sola vez)
 
 Esta Landing Zone concreta usa: cuenta SecDevOps `474632925684`, cuenta
-management `758626604929`, OU DEV `ou-p9fr-dqd5qn16` (no hay OUs de QA/Prod
-todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
+management `758626604929`, OU DEV `ou-p9fr-dqd5qn16` (único destino usado
+hoy — el guardrail `general` apunta ahí porque es la única OU con cuentas de
+trabajo en esta Landing Zone; no representa una etapa "dev" del pipeline).
 
 1.  **Delegated admin**: desde la cuenta management, registrar SecDevOps como
     administrador delegado de CloudFormation StackSets y habilitar *trusted
@@ -153,8 +185,7 @@ todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
     `repo:lxhiguera/bedrock-guardrails-stacksets:*` vía OIDC — sin llaves
     estáticas.
 5.  `guardrails/general/targets.json` ya está editado con los valores reales
-    de esta Landing Zone; actualizar los campos `_todo` de `qa`/`prod` cuando
-    existan las OUs correspondientes.
+    de esta Landing Zone.
 
 ## Flujo de trabajo en git
 
@@ -175,9 +206,10 @@ todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
 - Targets por **OU**, nunca listas de cuentas hardcodeadas.
 - `FailureTolerancePercentage` y `MaxConcurrentPercentage` configurables para
   despliegues progresivos y contención de fallos.
-- Un StackSet por entorno (`\\-dev`, `\\-qa`, `\\-prod`) con parámetros
-  diferenciados (dev con filtros MEDIUM, prod HIGH).
-- Aprobación manual antes de producción.
+- Un StackSet por guardrail, con un destino explícito (OU/cuenta) definido en
+  su propio `targets.json` — no atado a un concepto fijo de entornos.
+- Aprobación manual opcional **por guardrail** (`require_approval`), no un
+  gate global de "producción".
 
 **Guardrail**
 
@@ -185,7 +217,7 @@ todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
   inmutable, no `DRAFT`. Un cambio no aprobado en el draft no afecta producción.
 - Publicación de ID/versión en **SSM Parameter Store** con path estándar por
   guardrail: los equipos hacen
-  `{{resolve:ssm:/security/bedrock/guardrail/general/prod/id}}` y quedan
+  `{{resolve:ssm:/security/bedrock/guardrail/general/id}}` y quedan
   desacoplados.
 - Cobertura completa: filtros de contenido (incl. `PROMPT_ATTACK`), temas
   denegados, PII (bloqueo de credenciales AWS, tarjetas; anonimización de

@@ -1,6 +1,6 @@
 version: 0.2
 
-# Recibe TARGET_ENV (dev|qa|prod) desde la accion del pipeline
+# Recibe DEPLOY_STAGE (auto|approved) desde la accion del pipeline
 
 phases:
   install:
@@ -10,5 +10,5 @@ phases:
       - pip install --quiet boto3
   build:
     commands:
-      - echo "Desplegando guardrails para entorno ${TARGET_ENV}"
-      - python scripts/deploy_stackset.py --env "${TARGET_ENV}"
+      - echo "Desplegando guardrails, etapa ${DEPLOY_STAGE}"
+      - python scripts/deploy_stackset.py --stage "${DEPLOY_STAGE}"
