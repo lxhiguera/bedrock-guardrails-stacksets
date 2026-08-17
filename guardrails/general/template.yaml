@@ -10,9 +10,13 @@ Parameters:
     Default: general
     Description: Nombre logico del guardrail (debe coincidir con el nombre del directorio en guardrails/)
 
-  Environment:
+  EnvironmentTag:
     Type: String
-    AllowedValues: [dev, qa, prod]
+    Default: shared
+    Description: >-
+      Etiqueta libre para el tag Environment (proposito/criticidad del
+      guardrail). NO determina el destino del despliegue -- eso lo define
+      targets.json (organizational_unit_ids/account_ids).
 
   ContentFilterStrength:
     Type: String
@@ -46,8 +50,8 @@ Resources:
   Guardrail:
     Type: AWS::Bedrock::Guardrail
     Properties:
-      Name: !Sub 'bedrock-guardrail-${GuardrailName}-${Environment}'
-      Description: !Sub 'Guardrail ${GuardrailName} gestionado centralmente desde SecDevOps - entorno ${Environment}'
+      Name: !Sub 'bedrock-guardrail-${GuardrailName}'
+      Description: !Sub 'Guardrail ${GuardrailName} gestionado centralmente desde SecDevOps'
       BlockedInputMessaging: !Ref BlockedInputMessaging
       BlockedOutputsMessaging: !Ref BlockedOutputsMessaging
       KmsKeyArn: !If [HasKmsKey, !Ref KmsKeyArn, !Ref 'AWS::NoValue']
@@ -112,35 +116,35 @@ Resources:
         - Key: ManagedBy
           Value: secdevops-stacksets
         - Key: Environment
-          Value: !Ref Environment
+          Value: !Ref EnvironmentTag
 
   GuardrailVersion:
     Type: AWS::Bedrock::GuardrailVersion
     Properties:
       GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
-      Description: !Sub 'Version inmutable publicada - ${GuardrailName} - entorno ${Environment}'
+      Description: !Sub 'Version inmutable publicada - ${GuardrailName}'
 
   GuardrailIdParam:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/${Environment}/id'
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/id'
       Type: String
       Value: !GetAtt Guardrail.GuardrailId
-      Description: !Sub 'ID del Bedrock Guardrail local ${GuardrailName} - ${Environment}'
+      Description: !Sub 'ID del Bedrock Guardrail local ${GuardrailName}'
       Tags:
         ManagedBy: secdevops-stacksets
-        Environment: !Ref Environment
+        Environment: !Ref EnvironmentTag
 
   GuardrailVersionParam:
     Type: AWS::SSM::Parameter
     Properties:
-      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/${Environment}/version'
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/version'
       Type: String
       Value: !GetAtt GuardrailVersion.Version
-      Description: !Sub 'Version inmutable publicada del Bedrock Guardrail ${GuardrailName} - ${Environment}'
+      Description: !Sub 'Version inmutable publicada del Bedrock Guardrail ${GuardrailName}'
       Tags:
         ManagedBy: secdevops-stacksets
-        Environment: !Ref Environment
+        Environment: !Ref EnvironmentTag
 
 Outputs:
   GuardrailId:

@@ -313,9 +313,9 @@ Resources:
               InputArtifacts: [{ Name: SourceOutput }]
               OutputArtifacts: [{ Name: ValidatedOutput }]
 
-        - Name: DeployDev
+        - Name: Deploy
           Actions:
-            - Name: StackSetDev
+            - Name: StackSetAuto
               ActionTypeId:
                 Category: Build
                 Owner: AWS
@@ -323,23 +323,10 @@ Resources:
                 Version: '1'
               Configuration:
                 ProjectName: !Ref DeployProject
-                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"dev"}]'
+                EnvironmentVariables: '[{"name":"DEPLOY_STAGE","value":"auto"}]'
               InputArtifacts: [{ Name: ValidatedOutput }]
 
-        - Name: DeployQA
-          Actions:
-            - Name: StackSetQA
-              ActionTypeId:
-                Category: Build
-                Owner: AWS
-                Provider: CodeBuild
-                Version: '1'
-              Configuration:
-                ProjectName: !Ref DeployProject
-                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"qa"}]'
-              InputArtifacts: [{ Name: ValidatedOutput }]
-
-        - Name: ApproveProd
+        - Name: ApproveDeploy
           Actions:
             - Name: ManualApproval
               ActionTypeId:
@@ -349,11 +336,11 @@ Resources:
                 Version: '1'
               Configuration:
                 NotificationArn: !Ref ApprovalTopic
-                CustomData: 'Revisar cambios del guardrail antes de desplegar a PROD'
+                CustomData: 'Revisar guardrails con require_approval=true antes de aplicarlos'
 
-        - Name: DeployProd
+        - Name: DeployApproved
           Actions:
-            - Name: StackSetProd
+            - Name: StackSetApproved
               ActionTypeId:
                 Category: Build
                 Owner: AWS
@@ -361,7 +348,7 @@ Resources:
                 Version: '1'
               Configuration:
                 ProjectName: !Ref DeployProject
-                EnvironmentVariables: '[{"name":"TARGET_ENV","value":"prod"}]'
+                EnvironmentVariables: '[{"name":"DEPLOY_STAGE","value":"approved"}]'
               InputArtifacts: [{ Name: ValidatedOutput }]
 
 Outputs:
