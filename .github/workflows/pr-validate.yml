@@ -24,15 +24,18 @@ jobs:
         run: pip install cfn-lint checkov
 
       - name: cfn-lint
-        run: cfn-lint guardrails/template.yaml pipeline/pipeline.yaml
+        run: cfn-lint guardrails/*/template.yaml pipeline/pipeline.yaml
 
       - name: checkov (seguridad IaC)
         run: |
           checkov -d guardrails --framework cloudformation --compact
           checkov -d pipeline --framework cloudformation --compact
 
-      - name: Validar JSON de configuracion
-        run: python -c "import json; json.load(open('guardrails/config/deployment-targets.json'))"
+      - name: Validar JSON de targets (por guardrail)
+        run: |
+          for f in guardrails/*/targets.json; do
+            python -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+          done
 
   # Opcional: validate-template contra AWS usando OIDC (rol de solo lectura)
   aws-validate:
@@ -44,8 +47,11 @@ jobs:
       - name: Configurar credenciales via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<SECDEVOPS_ACCOUNT_ID>:role/github-actions-validate-role
+          role-to-assume: arn:aws:iam::474632925684:role/github-actions-validate-role
           aws-region: us-east-1
 
-      - name: cloudformation validate-template
-        run: aws cloudformation validate-template --template-body file://guardrails/template.yaml
+      - name: cloudformation validate-template (por guardrail)
+        run: |
+          for f in guardrails/*/template.yaml; do
+            aws cloudformation validate-template --template-body "file://$f"
+          done
