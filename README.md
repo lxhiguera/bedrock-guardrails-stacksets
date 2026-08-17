@@ -130,10 +130,28 @@ todavía — ver los campos `_todo` en `guardrails/general/targets.json`).
         GitHubRepo=<owner/repo>
     ```
     en la cuenta SecDevOps (`474632925684`).
-4.  **OIDC para GitHub Actions** (opcional): crear el rol `
-    github-actions-validate-role` con trust hacia el proveedor OIDC de GitHub,
-    permisos de solo lectura (`cloudformation:ValidateTemplate`), en la cuenta
-    SecDevOps.
+4.  **OIDC para GitHub Actions** (opcional — habilita el job `aws-validate`
+    de `pr-validate.yml`): crear el rol `github-actions-validate-role` con
+    [`bootstrap/github-oidc-role.yaml`](bootstrap/github-oidc-role.yaml) en
+    la cuenta SecDevOps:
+    ```bash
+    aws cloudformation deploy \
+      --template-file bootstrap/github-oidc-role.yaml \
+      --stack-name bedrock-guardrails-github-oidc \
+      --capabilities CAPABILITY_NAMED_IAM \
+      --region us-east-1 \
+      --parameter-overrides \
+        GitHubOrg=lxhiguera \
+        GitHubRepoName=bedrock-guardrails-stacksets
+    ```
+    Si esta cuenta **ya tiene** un proveedor OIDC de GitHub configurado (por
+    otro pipeline, `token.actions.githubusercontent.com`), agregar
+    `CreateOidcProvider=false` — AWS solo permite un proveedor OIDC por URL
+    por cuenta y el deploy fallaría al intentar crear un duplicado. El rol
+    creado solo tiene permiso `cloudformation:ValidateTemplate` (solo
+    lectura) y su trust policy limita quién puede asumirlo a
+    `repo:lxhiguera/bedrock-guardrails-stacksets:*` vía OIDC — sin llaves
+    estáticas.
 5.  `guardrails/general/targets.json` ya está editado con los valores reales
     de esta Landing Zone; actualizar los campos `_todo` de `qa`/`prod` cuando
     existan las OUs correspondientes.
