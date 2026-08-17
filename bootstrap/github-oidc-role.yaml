@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Rol IAM de solo lectura para que GitHub Actions (pr-validate.yml) pueda
+  hacer cloudformation:ValidateTemplate contra la cuenta SecDevOps via OIDC,
+  sin llaves estaticas. Desplegar UNA VEZ en la cuenta SecDevOps (474632925684).
+
+  Si la cuenta ya tiene configurado el proveedor OIDC de GitHub
+  (https://token.actions.githubusercontent.com) -- por ejemplo por otro
+  pipeline -- poner CreateOidcProvider=false, porque AWS solo permite un
+  proveedor OIDC por URL por cuenta.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: lxhiguera
+    Description: Owner/organizacion de GitHub
+
+  GitHubRepoName:
+    Type: String
+    Default: bedrock-guardrails-stacksets
+    Description: Nombre del repositorio (sin el owner)
+
+  CreateOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: 'false si el OIDC provider de GitHub ya existe en esta cuenta'
+
+Conditions:
+  ShouldCreateProvider: !Equals [!Ref CreateOidcProvider, 'true']
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  GitHubActionsValidateRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-actions-validate-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - ShouldCreateProvider
+                - !Ref GitHubOidcProvider
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepoName}:*'
+      Policies:
+        - PolicyName: ValidateTemplateOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: '*'
+      Tags:
+        - Key: ManagedBy
+          Value: secdevops-stacksets
+
+Outputs:
+  RoleArn:
+    Description: Pasar este ARN en .github/workflows/pr-validate.yml (job aws-validate, role-to-assume)
+    Value: !GetAtt GitHubActionsValidateRole.Arn
