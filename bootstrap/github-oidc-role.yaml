@@ -59,7 +59,13 @@ Resources:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepoName}:*'
+                # GitHub puede mandar el sub por nombre (repo:org/repo:*) o,
+                # como proteccion anti-hijacking tras un rename/transfer, con
+                # los IDs inmutables anexados (repo:org@orgId/repo@repoId:*).
+                # Se aceptan ambos formatos.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub 'repo:${GitHubOrg}/${GitHubRepoName}:*'
+                  - !Sub 'repo:${GitHubOrg}@*/${GitHubRepoName}@*:*'
       Policies:
         - PolicyName: ValidateTemplateOnly
           PolicyDocument:
