@@ -302,7 +302,13 @@ Resources:
                   - cloudformation:StopStackSetOperation
                   - cloudformation:TagResource
                 Resource:
-                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/bedrock-guardrail-*:*'
+                  # El account ID del ARN de un StackSet SERVICE_MANAGED es
+                  # el de la cuenta management de Organizations (quien
+                  # formalmente "administra" el StackSet), no el de esta
+                  # cuenta SecDevOps que opera como delegated admin -- por
+                  # eso se usa wildcard en ese segmento en vez de
+                  # ${AWS::AccountId}.
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:*:stackset/bedrock-guardrail-*:*'
               - Sid: OrgReadForServiceManaged
                 Effect: Allow
                 Action:
