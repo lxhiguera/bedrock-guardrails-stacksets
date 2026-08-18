@@ -23,8 +23,69 @@ Parameters:
 Resources:
 
   # ------------------------------------------------------------------
+  # KMS CMK compartida: cifra el bucket de artefactos y el topico SNS.
+  # ------------------------------------------------------------------
+  PipelineKmsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'CMK para artefactos S3 y notificaciones SNS de ${PipelineName}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowKeyAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root' }
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: AllowPipelineRolesUsage
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${PipelineName}-pipeline-role'
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${PipelineName}-validate-role'
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${PipelineName}-deploy-role'
+            Action: [kms:Decrypt, kms:GenerateDataKey*, kms:DescribeKey]
+            Resource: '*'
+          - Sid: AllowS3ServiceUsage
+            Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: [kms:Decrypt, kms:GenerateDataKey*]
+            Resource: '*'
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+          - Sid: AllowSnsServiceUsage
+            Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: [kms:Decrypt, kms:GenerateDataKey*]
+            Resource: '*'
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+
+  PipelineKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${PipelineName}-cmk'
+      TargetKeyId: !Ref PipelineKmsKey
+
+  # ------------------------------------------------------------------
   # Almacenamiento de artefactos (cifrado, sin acceso publico)
   # ------------------------------------------------------------------
+  # Bucket dedicado a los access logs del bucket de artefactos.
   AccessLogsBucket:
     Type: AWS::S3::Bucket
     Metadata:
@@ -62,6 +123,14 @@ Resources:
       Bucket: !Ref AccessLogsBucket
       PolicyDocument:
         Statement:
+          - Sid: AllowArtifactBucketLogDelivery
+            Effect: Allow
+            Principal: { Service: logging.s3.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub '${AccessLogsBucket.Arn}/artifact-bucket-access-logs/*'
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+              ArnLike: { 'aws:SourceArn': !GetAtt ArtifactBucket.Arn }
           - Sid: DenyInsecureTransport
             Effect: Deny
             Principal: '*'
@@ -83,6 +152,8 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt PipelineKmsKey.Arn
+            BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -138,6 +209,10 @@ Resources:
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub '${ArtifactBucket.Arn}/*'
+              - Sid: ArtifactsKms
+                Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey*]
+                Resource: !GetAtt PipelineKmsKey.Arn
               - Sid: GitHubConnection
                 Effect: Allow
                 Action: codestar-connections:UseConnection
@@ -152,6 +227,10 @@ Resources:
                 Effect: Allow
                 Action: sns:Publish
                 Resource: !Ref ApprovalTopic
+              - Sid: NotificationsKms
+                Effect: Allow
+                Action: [kms:GenerateDataKey, kms:Decrypt]
+                Resource: !GetAtt PipelineKmsKey.Arn
 
   ValidateBuildRole:
     Type: AWS::IAM::Role
@@ -175,21 +254,14 @@ Resources:
                 Action: [s3:GetObject, s3:GetObjectVersion, s3:PutObject]
                 Resource: !Sub '${ArtifactBucket.Arn}/*'
               - Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey*]
+                Resource: !GetAtt PipelineKmsKey.Arn
+              - Effect: Allow
                 Action: cloudformation:ValidateTemplate
                 Resource: '*'
 
   DeployBuildRole:
     Type: AWS::IAM::Role
-    Metadata:
-      checkov:
-        skip:
-          - id: CKV_AWS_111
-            comment: >-
-              Las acciones de StackSets (CreateStackSet, UpdateStackSet, etc.)
-              no soportan permisos a nivel de recurso para create/update en
-              todos los casos; Resource:* es requerido por la API de AWS.
-              Mitigado por CallAs=DELEGATED_ADMIN + trust boundary de
-              Organizations (solo SecDevOps es delegated admin).
     Properties:
       RoleName: !Sub '${PipelineName}-deploy-role'
       AssumeRolePolicyDocument:
@@ -209,10 +281,16 @@ Resources:
               - Effect: Allow
                 Action: [s3:GetObject, s3:GetObjectVersion]
                 Resource: !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt PipelineKmsKey.Arn
+              - Sid: StackSetsCreate
+                Effect: Allow
+                Action: cloudformation:CreateStackSet
+                Resource: '*'
               - Sid: StackSetsDelegatedAdmin
                 Effect: Allow
                 Action:
-                  - cloudformation:CreateStackSet
                   - cloudformation:UpdateStackSet
                   - cloudformation:DescribeStackSet
                   - cloudformation:DescribeStackSetOperation
@@ -223,7 +301,8 @@ Resources:
                   - cloudformation:DeleteStackInstances
                   - cloudformation:StopStackSetOperation
                   - cloudformation:TagResource
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stackset/bedrock-guardrail-*:*'
               - Sid: OrgReadForServiceManaged
                 Effect: Allow
                 Action:
@@ -270,7 +349,7 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub '${PipelineName}-approvals'
-      KmsMasterKeyId: alias/aws/sns
+      KmsMasterKeyId: !Ref PipelineKmsKey
 
   # ------------------------------------------------------------------
   # Pipeline
