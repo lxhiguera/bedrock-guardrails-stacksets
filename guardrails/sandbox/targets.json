@@ -1,0 +1,25 @@
+{
+  "stackset_name": "bedrock-guardrail-sandbox",
+  "call_as": "DELEGATED_ADMIN",
+  "permission_model": "SERVICE_MANAGED",
+  "require_approval": false,
+  "auto_deployment": {
+    "Enabled": true,
+    "RetainStacksOnAccountRemoval": false
+  },
+  "operation_preferences": {
+    "FailureTolerancePercentage": 0,
+    "MaxConcurrentPercentage": 100
+  },
+  "organizational_unit_ids": ["ou-p9fr-x60n2ham"],
+  "regions": ["us-east-1"],
+  "parameters": {
+    "GuardrailName": "sandbox",
+    "EnvironmentTag": "sandbox",
+    "ContentFilterStrength": "LOW",
+    "PromptAttackFilterStrength": "MEDIUM",
+    "BlockedInputMessaging": "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail.",
+    "BlockedOutputsMessaging": "La respuesta fue bloqueada por las politicas de seguridad del guardrail.",
+    "KmsKeyArn": ""
+  }
+}
