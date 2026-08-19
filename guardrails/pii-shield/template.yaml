@@ -3,11 +3,12 @@ Description: >
   Bedrock Guardrail local (AWS::Bedrock::Guardrail + GuardrailVersion) +
   publicacion de ID/version en SSM Parameter Store. Se despliega por
   CloudFormation StackSets (SERVICE_MANAGED) en cada cuenta miembro.
+  Enfocado en deteccion/bloqueo de informacion sensible (PII).
 
 Parameters:
   GuardrailName:
     Type: String
-    Default: sandbox
+    Default: pii-shield
     Description: Nombre logico del guardrail (debe coincidir con el nombre del directorio en guardrails/)
 
   EnvironmentTag:
@@ -85,32 +86,26 @@ Resources:
             Action: BLOCK
           - Type: CREDIT_DEBIT_CARD_NUMBER
             Action: BLOCK
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: BLOCK
+          - Type: US_BANK_ACCOUNT_NUMBER
+            Action: BLOCK
+          - Type: PASSWORD
+            Action: BLOCK
           - Type: EMAIL
             Action: ANONYMIZE
           - Type: PHONE
             Action: ANONYMIZE
-
-      TopicPolicyConfig:
-        TopicsConfig:
-          - Name: AsesoriaFinanciera
-            Type: DENY
-            Definition: >
-              Solicitudes de asesoria financiera personalizada, recomendaciones
-              de inversion o instrucciones para eludir controles financieros.
-            Examples:
-              - '¿En que deberia invertir mis ahorros?'
-              - 'Recomiendame acciones para comprar hoy'
+          - Type: NAME
+            Action: ANONYMIZE
+          - Type: ADDRESS
+            Action: ANONYMIZE
+          - Type: USERNAME
+            Action: ANONYMIZE
 
       WordPolicyConfig:
         ManagedWordListsConfig:
           - Type: PROFANITY
-
-      ContextualGroundingPolicyConfig:
-        FiltersConfig:
-          - Type: GROUNDING
-            Threshold: 0.75
-          - Type: RELEVANCE
-            Threshold: 0.75
 
       Tags:
         - Key: ManagedBy
