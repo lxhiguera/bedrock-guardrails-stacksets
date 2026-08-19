@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bedrock Guardrail local (AWS::Bedrock::Guardrail + GuardrailVersion) +
+  publicacion de ID/version en SSM Parameter Store. Se despliega por
+  CloudFormation StackSets (SERVICE_MANAGED) en cada cuenta miembro.
+  Enfocado en deteccion/bloqueo de informacion sensible (PII).
+
+Parameters:
+  GuardrailName:
+    Type: String
+    Default: pii-shield
+    Description: Nombre logico del guardrail (debe coincidir con el nombre del directorio en guardrails/)
+
+  EnvironmentTag:
+    Type: String
+    Default: sandbox
+    Description: >-
+      Etiqueta libre para el tag Environment (proposito/criticidad del
+      guardrail). NO determina el destino del despliegue -- eso lo define
+      targets.json (organizational_unit_ids/account_ids).
+
+  ContentFilterStrength:
+    Type: String
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Default: LOW
+    Description: Fuerza de los filtros de contenido (HATE, INSULTS, SEXUAL, VIOLENCE, MISCONDUCT)
+
+  PromptAttackFilterStrength:
+    Type: String
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Default: MEDIUM
+    Description: Fuerza del filtro PROMPT_ATTACK (entrada unicamente)
+
+  BlockedInputMessaging:
+    Type: String
+    Default: "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail."
+
+  BlockedOutputsMessaging:
+    Type: String
+    Default: "La respuesta fue bloqueada por las politicas de seguridad del guardrail."
+
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    Description: ARN de KMS CMK opcional para cifrar el guardrail. Vacio = cifrado por defecto de Bedrock.
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub 'bedrock-guardrail-${GuardrailName}'
+      Description: !Sub 'Guardrail ${GuardrailName} gestionado centralmente desde SecDevOps'
+      BlockedInputMessaging: !Ref BlockedInputMessaging
+      BlockedOutputsMessaging: !Ref BlockedOutputsMessaging
+      KmsKeyArn: !If [HasKmsKey, !Ref KmsKeyArn, !Ref 'AWS::NoValue']
+
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: INSULTS
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: SEXUAL
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: VIOLENCE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: MISCONDUCT
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: PROMPT_ATTACK
+            InputStrength: !Ref PromptAttackFilterStrength
+            OutputStrength: NONE
+
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: AWS_ACCESS_KEY
+            Action: BLOCK
+          - Type: AWS_SECRET_KEY
+            Action: BLOCK
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: BLOCK
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: BLOCK
+          - Type: US_BANK_ACCOUNT_NUMBER
+            Action: BLOCK
+          - Type: PASSWORD
+            Action: BLOCK
+          - Type: EMAIL
+            Action: ANONYMIZE
+          - Type: PHONE
+            Action: ANONYMIZE
+          - Type: NAME
+            Action: ANONYMIZE
+          - Type: ADDRESS
+            Action: ANONYMIZE
+          - Type: USERNAME
+            Action: ANONYMIZE
+
+      WordPolicyConfig:
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+      Tags:
+        - Key: ManagedBy
+          Value: secdevops-stacksets
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: !Sub 'Version inmutable publicada - ${GuardrailName}'
+
+  GuardrailIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/id'
+      Type: String
+      Value: !GetAtt Guardrail.GuardrailId
+      Description: !Sub 'ID del Bedrock Guardrail local ${GuardrailName}'
+      Tags:
+        ManagedBy: secdevops-stacksets
+        Environment: !Ref EnvironmentTag
+
+  GuardrailVersionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/version'
+      Type: String
+      Value: !GetAtt GuardrailVersion.Version
+      Description: !Sub 'Version inmutable publicada del Bedrock Guardrail ${GuardrailName}'
+      Tags:
+        ManagedBy: secdevops-stacksets
+        Environment: !Ref EnvironmentTag
+
+Outputs:
+  GuardrailId:
+    Value: !GetAtt Guardrail.GuardrailId
+  GuardrailVersion:
+    Value: !GetAtt GuardrailVersion.Version
