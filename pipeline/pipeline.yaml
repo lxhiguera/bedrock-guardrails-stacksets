@@ -315,10 +315,13 @@ Resources:
                   # stackset-target, que no lleva region en el ARN.
                   - 'arn:aws:cloudformation::*:stackset-target/bedrock-guardrail-*:*'
                   # Ademas del stackset y el target, CloudFormation evalua el
-                  # permiso contra el ARN del tipo de recurso registrado que
-                  # el template despliega (los "::" del tipo se vuelven "-").
-                  - !Sub 'arn:aws:cloudformation:${AWS::Region}::type/resource/AWS-Bedrock-Guardrail'
-                  - !Sub 'arn:aws:cloudformation:${AWS::Region}::type/resource/AWS-Bedrock-GuardrailVersion'
+                  # permiso contra el ARN de CADA tipo de recurso que el
+                  # template despliega (AWS::Bedrock::Guardrail, GuardrailVersion,
+                  # AWS::SSM::Parameter, etc. -- los "::" se vuelven "-").
+                  # Wildcard sobre todos los tipos publicados por AWS en vez
+                  # de listar uno por uno cada vez que un guardrail agregue
+                  # un tipo de recurso nuevo al template.
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}::type/resource/AWS-*'
               - Sid: OrgReadForServiceManaged
                 Effect: Allow
                 Action:
