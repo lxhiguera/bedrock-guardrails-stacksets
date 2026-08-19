@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Bedrock Guardrail local (AWS::Bedrock::Guardrail + GuardrailVersion) +
+  publicacion de ID/version en SSM Parameter Store. Se despliega por
+  CloudFormation StackSets (SERVICE_MANAGED) en cada cuenta miembro.
+  Proteccion multi-capa: bloqueo de temas de asesoria financiera no
+  autorizada, defensa reforzada contra prompt injection y verificacion
+  de contextual grounding.
+
+Parameters:
+  GuardrailName:
+    Type: String
+    Default: financial-advisory-guard
+    Description: Nombre logico del guardrail (debe coincidir con el nombre del directorio en guardrails/)
+
+  EnvironmentTag:
+    Type: String
+    Default: devtest
+    Description: >-
+      Etiqueta libre para el tag Environment (proposito/criticidad del
+      guardrail). NO determina el destino del despliegue -- eso lo define
+      targets.json (organizational_unit_ids/account_ids).
+
+  ContentFilterStrength:
+    Type: String
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Default: HIGH
+    Description: Fuerza de los filtros de contenido (HATE, INSULTS, SEXUAL, VIOLENCE, MISCONDUCT)
+
+  PromptAttackFilterStrength:
+    Type: String
+    AllowedValues: [NONE, LOW, MEDIUM, HIGH]
+    Default: HIGH
+    Description: Fuerza del filtro PROMPT_ATTACK (entrada unicamente)
+
+  BlockedInputMessaging:
+    Type: String
+    Default: "Tu solicitud fue bloqueada por las politicas de seguridad del guardrail."
+
+  BlockedOutputsMessaging:
+    Type: String
+    Default: "La respuesta fue bloqueada por las politicas de seguridad del guardrail."
+
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    Description: ARN de KMS CMK opcional para cifrar el guardrail. Vacio = cifrado por defecto de Bedrock.
+
+Conditions:
+  HasKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+
+Resources:
+  Guardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub 'bedrock-guardrail-${GuardrailName}'
+      Description: !Sub 'Guardrail ${GuardrailName} gestionado centralmente desde SecDevOps'
+      BlockedInputMessaging: !Ref BlockedInputMessaging
+      BlockedOutputsMessaging: !Ref BlockedOutputsMessaging
+      KmsKeyArn: !If [HasKmsKey, !Ref KmsKeyArn, !Ref 'AWS::NoValue']
+
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: INSULTS
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: SEXUAL
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: VIOLENCE
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: MISCONDUCT
+            InputStrength: !Ref ContentFilterStrength
+            OutputStrength: !Ref ContentFilterStrength
+          - Type: PROMPT_ATTACK
+            InputStrength: !Ref PromptAttackFilterStrength
+            OutputStrength: NONE
+
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: AWS_ACCESS_KEY
+            Action: BLOCK
+          - Type: AWS_SECRET_KEY
+            Action: BLOCK
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: BLOCK
+          - Type: EMAIL
+            Action: ANONYMIZE
+          - Type: PHONE
+            Action: ANONYMIZE
+
+      TopicPolicyConfig:
+        TopicsConfig:
+          - Name: AsesoriaFinanciera
+            Type: DENY
+            Definition: >
+              Solicitudes de asesoria financiera personalizada, recomendaciones
+              de inversion o instrucciones para eludir controles financieros.
+            Examples:
+              - '¿En que deberia invertir mis ahorros?'
+              - 'Recomiendame acciones para comprar hoy'
+          - Name: TradingNoRegulado
+            Type: DENY
+            Definition: >
+              Estrategias de trading algoritmico, senales de compra/venta o
+              promesas de rentabilidad garantizada sin licencia regulatoria.
+            Examples:
+              - 'Dame una senal de compra para esta accion ahora mismo'
+              - 'Diseñame un bot que garantice ganancias en cripto'
+
+      WordPolicyConfig:
+        ManagedWordListsConfig:
+          - Type: PROFANITY
+
+      ContextualGroundingPolicyConfig:
+        FiltersConfig:
+          - Type: GROUNDING
+            Threshold: 0.75
+          - Type: RELEVANCE
+            Threshold: 0.75
+
+      Tags:
+        - Key: ManagedBy
+          Value: secdevops-stacksets
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  GuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Properties:
+      GuardrailIdentifier: !GetAtt Guardrail.GuardrailId
+      Description: !Sub 'Version inmutable publicada - ${GuardrailName}'
+
+  GuardrailIdParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/id'
+      Type: String
+      Value: !GetAtt Guardrail.GuardrailId
+      Description: !Sub 'ID del Bedrock Guardrail local ${GuardrailName}'
+      Tags:
+        ManagedBy: secdevops-stacksets
+        Environment: !Ref EnvironmentTag
+
+  GuardrailVersionParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/security/bedrock/guardrail/${GuardrailName}/version'
+      Type: String
+      Value: !GetAtt GuardrailVersion.Version
+      Description: !Sub 'Version inmutable publicada del Bedrock Guardrail ${GuardrailName}'
+      Tags:
+        ManagedBy: secdevops-stacksets
+        Environment: !Ref EnvironmentTag
+
+Outputs:
+  GuardrailId:
+    Value: !GetAtt Guardrail.GuardrailId
+  GuardrailVersion:
+    Value: !GetAtt GuardrailVersion.Version
