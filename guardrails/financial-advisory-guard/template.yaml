@@ -3,11 +3,14 @@ Description: >
   Bedrock Guardrail local (AWS::Bedrock::Guardrail + GuardrailVersion) +
   publicacion de ID/version en SSM Parameter Store. Se despliega por
   CloudFormation StackSets (SERVICE_MANAGED) en cada cuenta miembro.
+  Proteccion multi-capa: bloqueo de temas de asesoria financiera no
+  autorizada, defensa reforzada contra prompt injection y verificacion
+  de contextual grounding.
 
 Parameters:
   GuardrailName:
     Type: String
-    Default: devtest
+    Default: financial-advisory-guard
     Description: Nombre logico del guardrail (debe coincidir con el nombre del directorio en guardrails/)
 
   EnvironmentTag:
@@ -100,6 +103,14 @@ Resources:
             Examples:
               - '¿En que deberia invertir mis ahorros?'
               - 'Recomiendame acciones para comprar hoy'
+          - Name: TradingNoRegulado
+            Type: DENY
+            Definition: >
+              Estrategias de trading algoritmico, senales de compra/venta o
+              promesas de rentabilidad garantizada sin licencia regulatoria.
+            Examples:
+              - 'Dame una senal de compra para esta accion ahora mismo'
+              - 'Diseñame un bot que garantice ganancias en cripto'
 
       WordPolicyConfig:
         ManagedWordListsConfig:

@@ -1,5 +1,5 @@
 {
-  "stackset_name": "bedrock-guardrail-devtest",
+  "stackset_name": "bedrock-guardrail-financial-advisory-guard",
   "call_as": "DELEGATED_ADMIN",
   "permission_model": "SERVICE_MANAGED",
   "require_approval": true,
@@ -16,7 +16,7 @@
   "account_filter_type": "INTERSECTION",
   "regions": ["us-east-1"],
   "parameters": {
-    "GuardrailName": "devtest",
+    "GuardrailName": "financial-advisory-guard",
     "EnvironmentTag": "devtest",
     "ContentFilterStrength": "HIGH",
     "PromptAttackFilterStrength": "HIGH",
