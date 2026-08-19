@@ -309,6 +309,11 @@ Resources:
                   # eso se usa wildcard en ese segmento en vez de
                   # ${AWS::AccountId}.
                   - !Sub 'arn:aws:cloudformation:${AWS::Region}:*:stackset/bedrock-guardrail-*:*'
+                  # UpdateStackSet (con DeploymentTargets) y las acciones de
+                  # stack instances (Create/Update/DeleteStackInstances) se
+                  # evaluan ademas contra un tipo de recurso separado,
+                  # stackset-target, que no lleva region en el ARN.
+                  - 'arn:aws:cloudformation::*:stackset-target/bedrock-guardrail-*:*'
               - Sid: OrgReadForServiceManaged
                 Effect: Allow
                 Action:
