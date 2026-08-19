@@ -33,7 +33,7 @@ CI/CD pipeline (CloudFormation + CodePipeline + CodeBuild) that centrally deploy
 ## Architecture / flow
 
 1. PR opened → GitHub Actions (`pr-validate.yml`) runs `cfn-lint` + `checkov` + JSON validation.
-2. Merge to `main` → CodeConnections triggers CodePipeline in SecDevOps (note: as of 2026-08-17 this webhook trigger was observed NOT firing automatically after merges — see "Known issue" below; may need `aws codepipeline start-pipeline-execution` manually).
+2. Merge to `main` → CodeConnections triggers CodePipeline in SecDevOps automatically via GitHub webhook.
 3. **Validate** stage repeats lint/scan inside AWS.
 4. **Deploy**: `deploy_stackset.py --stage auto` — every guardrail with `require_approval: false` (default) deploys immediately to its declared target.
 5. **ApproveDeploy** — manual approval gate (SNS), only gates guardrails flagged `require_approval: true`.
@@ -49,9 +49,13 @@ Key design points to preserve when editing:
 - IAM roles are split by function (pipeline / validate / deploy) with least privilege.
 - Artifact bucket is encrypted (KMS), versioned, blocks public access, denies insecure transport, 90-day lifecycle, and has `LoggingConfiguration` pointing at a dedicated `AccessLogsBucket` (versioned, AES256, own 90-day lifecycle) — preserve when modifying `pipeline/pipeline.yaml`. `ApprovalTopic` (SNS) uses `KmsMasterKeyId: alias/aws/sns`. `DeployBuildRole`'s `StackSetsDelegatedAdmin` statement has a documented `checkov:skip` for `CKV_AWS_111` (StackSets create/update actions don't support resource-level ARNs) — keep that Metadata block if touching the role.
 
-## Known issue: pipeline doesn't auto-trigger on merge
+## Resolved issue: pipeline wasn't auto-triggering on merge
 
-Observed 2026-08-17: after merging PRs to `main`, `aws codepipeline list-pipeline-executions` showed only the single execution from initial `pipeline.yaml` deploy — no new execution fired via the CodeConnections webhook despite `DetectChanges: true`. Root cause not yet diagnosed (candidates: connection not fully `AVAILABLE`, webhook registration issue). Workaround: `aws codepipeline start-pipeline-execution --name bedrock-guardrails-deploy --region us-east-1` after merging. If revisited, check `aws codeconnections list-connections` for `ConnectionStatus`.
+Observed 2026-08-17 through 2026-08-19: merges to `main` never fired the CodePipeline execution automatically (`aws codepipeline list-pipeline-executions` only showed manual `StartPipelineExecution` triggers, never `Webhook`), even though the CodeConnections `Connection` showed `ConnectionStatus: AVAILABLE` and `pipeline.yaml`'s source action had `DetectChanges: true`. `ConnectionStatus: AVAILABLE` only confirms the account-level handshake — it does NOT mean the underlying GitHub App ("AWS Connector for GitHub") has been granted access to this specific repo.
+
+Root cause (found 2026-08-19 by diffing against a working CodeConnections-sourced pipeline in another account, which had `Trigger: Webhook` executions): the "AWS Connector for GitHub" App installation was scoped to "Only select repositories" and `bedrock-guardrails-stacksets` was not in that list, so GitHub never sent push webhooks for it. Fixed by adding the repo to the App's repository access list at `https://github.com/settings/installations` (or the org equivalent) → AWS Connector for GitHub → Configure.
+
+If this resurfaces on a new repo/connection: check the GitHub App's repository access list first, before assuming a CloudFormation/`Triggers` config issue.
 
 ## Working with this repo
 
